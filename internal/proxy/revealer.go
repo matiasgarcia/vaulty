@@ -1,0 +1,110 @@
+package proxy
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"regexp"
+)
+
+var tokenPattern = regexp.MustCompile(`^tok_[a-zA-Z0-9]{32,}$`)
+
+// DetokenizeResult holds the revealed data for a single token.
+type DetokenizeResult struct {
+	PAN         string  `json:"pan"`
+	ExpiryMonth int     `json:"expiry_month"`
+	ExpiryYear  int     `json:"expiry_year"`
+	CVV         *string `json:"cvv"`
+}
+
+// Revealer scans JSON payloads for token patterns and reveals them
+// by calling the Tokenizer's /internal/detokenize endpoint.
+type Revealer struct {
+	client       *http.Client
+	detokenizeURL string
+}
+
+func NewRevealer(client *http.Client, tokenizerBaseURL string) *Revealer {
+	return &Revealer{
+		client:       client,
+		detokenizeURL: tokenizerBaseURL + "/internal/detokenize",
+	}
+}
+
+// ScanAndReveal recursively walks a JSON payload, finds string values
+// matching the token pattern, calls detokenize for each, and replaces
+// the token value with the revealed card data.
+func (rv *Revealer) ScanAndReveal(ctx context.Context, payload interface{}) (interface{}, error) {
+	switch v := payload.(type) {
+	case map[string]interface{}:
+		for key, val := range v {
+			revealed, err := rv.ScanAndReveal(ctx, val)
+			if err != nil {
+				return nil, err
+			}
+			v[key] = revealed
+		}
+		return v, nil
+
+	case []interface{}:
+		for i, val := range v {
+			revealed, err := rv.ScanAndReveal(ctx, val)
+			if err != nil {
+				return nil, err
+			}
+			v[i] = revealed
+		}
+		return v, nil
+
+	case string:
+		if tokenPattern.MatchString(v) {
+			result, err := rv.detokenize(ctx, v)
+			if err != nil {
+				return nil, fmt.Errorf("detokenize %s: %w", v[:12]+"...", err)
+			}
+			// Replace token string with revealed data object
+			revealed := map[string]interface{}{
+				"pan":          result.PAN,
+				"expiry_month": result.ExpiryMonth,
+				"expiry_year":  result.ExpiryYear,
+			}
+			if result.CVV != nil {
+				revealed["cvv"] = *result.CVV
+			}
+			return revealed, nil
+		}
+		return v, nil
+
+	default:
+		return v, nil
+	}
+}
+
+func (rv *Revealer) detokenize(ctx context.Context, token string) (*DetokenizeResult, error) {
+	body, _ := json.Marshal(map[string]string{"token": token})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rv.detokenizeURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := rv.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("detokenize request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("detokenize returned %d: %s", resp.StatusCode, respBody)
+	}
+
+	var result DetokenizeResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode detokenize response: %w", err)
+	}
+	return &result, nil
+}
