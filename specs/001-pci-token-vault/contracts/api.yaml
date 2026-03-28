@@ -1,0 +1,459 @@
+openapi: 3.1.0
+info:
+  title: PCI Token Vault & Payment Proxy API
+  version: 1.0.0
+  description: >
+    PCI DSS-compliant tokenization vault and payment proxy.
+    All endpoints require mTLS and Bearer token authentication.
+
+servers:
+  - url: https://vault.internal
+    description: CDE internal (mTLS required)
+
+security:
+  - BearerAuth: []
+
+paths:
+  /vault/tokenize:
+    post:
+      operationId: tokenize
+      summary: Tokenize a payment card
+      description: >
+        Accepts PAN, expiry, and CVV. Validates PAN (Luhn), encrypts
+        and stores PAN, stores CVV with TTL, returns deterministic
+        token. If PAN already exists (via blind index), returns the
+        existing token and updates CVV/expiry.
+      tags: [Tokenization]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenizeRequest'
+      responses:
+        '200':
+          description: Token returned (existing PAN, CVV/expiry updated)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenizeResponse'
+        '201':
+          description: Token created (new PAN)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenizeResponse'
+        '400':
+          description: Validation error (invalid PAN, bad Luhn, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: KMS unavailable — cannot encrypt safely
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /vault/tokens/{token_id}:
+    get:
+      operationId: getTokenStatus
+      summary: Validate token existence and status
+      tags: [Token Management]
+      parameters:
+        - $ref: '#/components/parameters/TokenId'
+      responses:
+        '200':
+          description: Token status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenStatusResponse'
+        '404':
+          description: Token not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      operationId: deactivateToken
+      summary: Deactivate a token (soft-delete)
+      description: >
+        Sets token status to inactive. Irreversible. Token data
+        retained for audit purposes.
+      tags: [Token Management]
+      parameters:
+        - $ref: '#/components/parameters/TokenId'
+      responses:
+        '200':
+          description: Token deactivated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenStatusResponse'
+        '404':
+          description: Token not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /vault/tokens/{token_id}/audit:
+    get:
+      operationId: getTokenAuditTrail
+      summary: Retrieve audit trail for a token
+      tags: [Audit]
+      parameters:
+        - $ref: '#/components/parameters/TokenId'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditTrailResponse'
+
+  /internal/detokenize:
+    post:
+      operationId: detokenize
+      summary: Reveal PAN + CVV for a token (internal, mTLS-only)
+      description: >
+        Internal endpoint exposed by the Tokenizer service. Only
+        accessible via mTLS from the Payment Proxy. Decrypts PAN
+        from vault, retrieves CVV from Redis (GETDEL — single use),
+        and returns the raw card data. The Proxy MUST NOT persist
+        the returned data — in-memory only, wiped after forwarding.
+      tags: [Internal]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+                  description: Token to detokenize
+      responses:
+        '200':
+          description: Detokenized card data
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pan, expiry_month, expiry_year]
+                properties:
+                  pan:
+                    type: string
+                    description: Raw PAN (plaintext, in-memory only)
+                  expiry_month:
+                    type: integer
+                  expiry_year:
+                    type: integer
+                  cvv:
+                    type: string
+                    nullable: true
+                    description: CVV if available (null if expired/used)
+        '404':
+          description: Token not found or inactive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller not authorized (non-Proxy mTLS cert)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /proxy/forward:
+    post:
+      operationId: forwardWithReveal
+      summary: Reveal token and forward to 3rd party provider
+      description: >
+        Stateless reveal-and-forward pipe. The Proxy calls the
+        Tokenizer's /internal/detokenize endpoint (mTLS) to reveal
+        PAN + CVV, constructs the outbound payload with real card
+        data, forwards to the configured 3rd party provider endpoint,
+        and returns the provider's response verbatim. The Proxy
+        stores NOTHING — no DB, no state. Card data is held
+        in-memory only and wiped immediately after forwarding.
+        Designed to be extensible beyond payments (personal data,
+        any tokenized field).
+      tags: [Proxy]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForwardRequest'
+      responses:
+        '200':
+          description: Provider response (verbatim pass-through)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ForwardResponse'
+        '400':
+          description: Invalid request (missing destination, malformed JSON)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: One or more tokens not found or inactive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: Destination provider unreachable or returned error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      tags: [Operations]
+      security: []
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Service-to-service bearer token (mTLS required)
+
+  parameters:
+    TokenId:
+      name: token_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^tok_[a-zA-Z0-9]{32,}$'
+
+  responses:
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Insufficient permissions (RBAC)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    TokenizeRequest:
+      type: object
+      required: [pan, expiry_month, expiry_year, cvv]
+      properties:
+        pan:
+          type: string
+          pattern: '^\d{13,19}$'
+          description: Primary Account Number (13-19 digits)
+        expiry_month:
+          type: integer
+          minimum: 1
+          maximum: 12
+        expiry_year:
+          type: integer
+          minimum: 2024
+        cvv:
+          type: string
+          pattern: '^\d{3,4}$'
+          description: Card verification value (3-4 digits)
+
+    TokenizeResponse:
+      type: object
+      required: [token, cvv_stored]
+      properties:
+        token:
+          type: string
+          example: tok_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
+        cvv_stored:
+          type: boolean
+          description: Whether CVV was successfully stored
+        is_existing:
+          type: boolean
+          description: True if PAN was already tokenized
+
+    TokenStatusResponse:
+      type: object
+      required: [token, status, created_at]
+      properties:
+        token:
+          type: string
+        status:
+          type: string
+          enum: [active, inactive]
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ForwardRequest:
+      type: object
+      required: [destination, payload]
+      properties:
+        destination:
+          type: string
+          format: uri
+          description: >
+            Target URL to forward the revealed payload to.
+            Can be any 3rd party provider endpoint.
+        method:
+          type: string
+          enum: [POST, PUT, PATCH]
+          default: POST
+          description: HTTP method for the outbound request
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: >
+            Additional headers to include in the outbound request
+            (e.g., provider API keys, content negotiation)
+        payload:
+          type: object
+          description: >
+            Arbitrary JSON payload. Any string value matching a
+            token pattern (tok_...) is automatically revealed
+            (replaced with real PAN + expiry). The rest of the
+            payload is forwarded unchanged.
+
+    ForwardResponse:
+      type: object
+      required: [status_code, body]
+      properties:
+        status_code:
+          type: integer
+          description: HTTP status code from the destination provider
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: Response headers from the destination
+        body:
+          type: object
+          nullable: true
+          description: >
+            Verbatim response body from the destination provider.
+            Proxy does not interpret or transform this.
+
+    AuditTrailResponse:
+      type: object
+      required: [entries, total]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEntry'
+        total:
+          type: integer
+
+    AuditEntry:
+      type: object
+      required: [id, operation, actor, result, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        correlation_id:
+          type: string
+        operation:
+          type: string
+          enum: [tokenize, detokenize, payment, deactivate, validate]
+        actor:
+          type: string
+        result:
+          type: string
+          enum: [success, denied, error]
+        detail:
+          type: object
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [healthy, unhealthy]
+        checks:
+          type: object
+          properties:
+            database:
+              type: string
+              enum: [up, down]
+            redis:
+              type: string
+              enum: [up, down]
+            kms:
+              type: string
+              enum: [up, down]
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Machine-readable error code
+              example: INVALID_PAN
+            message:
+              type: string
+              description: Human-readable description
+              example: PAN failed Luhn validation
+            correlation_id:
+              type: string
+              description: Request correlation ID for tracing
