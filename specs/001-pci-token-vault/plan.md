@@ -79,26 +79,21 @@ internal/
 ├── handler/                 # HTTP handlers
 │   ├── tokenize.go          # POST /vault/tokenize
 │   ├── detokenize.go        # POST /internal/detokenize (mTLS-only, Proxy→Tokenizer)
-│   ├── payment_record.go   # POST /internal/payments (mTLS-only, Proxy→Tokenizer)
-│   ├── charge.go            # POST /proxy/charge (Proxy service)
+│   ├── forward.go           # POST /proxy/forward (Proxy service — reveal & forward)
 │   ├── token_manage.go      # GET/DELETE /vault/tokens/{id}, GET audit
 │   └── health.go            # GET /health
-├── kms/                     # KMS client abstraction (DEK wrapping/unwrapping)
-│   ├── client.go
-│   └── mock.go
+├── kms/                     # KMS client (AWS SDK v2, LocalStack in dev)
+│   └── client.go
 ├── model/                   # Domain entities
 │   ├── token.go
 │   ├── vault_entry.go
-│   ├── payment.go
 │   └── audit.go
-├── provider/                # Payment provider adapters (reveal & forward)
-│   ├── adapter.go           # Interface: receives raw PAN+CVV+amount, forwards to PSP
-│   ├── http_forwarder.go    # Generic HTTP forwarder to any 3rd party PSP endpoint
-│   └── config.go            # Provider endpoint/credential configuration
+├── proxy/                   # Reveal & forward engine
+│   ├── revealer.go          # Scans JSON payload for token patterns, calls detokenize
+│   └── forwarder.go         # Forwards revealed payload to destination URL
 ├── repository/              # PostgreSQL data access (pgx)
 │   ├── token_repo.go
 │   ├── vault_repo.go
-│   ├── payment_repo.go
 │   └── audit_repo.go
 ├── redis/                   # Redis CVV store
 │   └── cvv_store.go
@@ -113,10 +108,8 @@ migrations/                  # SQL migration files (golang-migrate)
 ├── 001_create_tokens.down.sql
 ├── 002_create_vault_entries.up.sql
 ├── 002_create_vault_entries.down.sql
-├── 003_create_payment_transactions.up.sql
-├── 003_create_payment_transactions.down.sql
-├── 004_create_audit_log.up.sql
-└── 004_create_audit_log.down.sql
+├── 003_create_audit_log.up.sql
+└── 003_create_audit_log.down.sql
 
 config/
 └── config.go                # Environment-based configuration

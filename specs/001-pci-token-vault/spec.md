@@ -229,8 +229,8 @@ from the authorized payment proxy and verify access is granted.
   on all operations.
 - **FR-015**: System MUST support concurrent requests and maintain
   99.999% uptime (~5.3 minutes downtime per year).
-- **FR-016**: System MUST support idempotency keys for payment
-  operations to prevent duplicate processing.
+- **FR-016**: [REMOVED — idempotency is the calling client's
+  responsibility, not the vault/proxy system.]
 - **FR-017**: System MUST allow configuration of CVV TTL with a
   default of 1 hour.
 - **FR-018**: System MUST support integration with one or more
@@ -247,9 +247,6 @@ from the authorized payment proxy and verify access is granted.
   authentication tag, encrypted DEK, creation timestamp.
 - **CVV Record**: Ephemeral CVV storage. Attributes: token
   reference, CVV value, TTL, creation timestamp, usage status.
-- **Payment Transaction**: Record of a payment attempt. Attributes:
-  token reference, amount, currency, idempotency key, provider
-  response, status, timestamp.
 - **Audit Log Entry**: Immutable record of an operation. Attributes:
   operation type, token reference (masked), actor, timestamp,
   result, correlation ID.
@@ -267,14 +264,14 @@ from the authorized payment proxy and verify access is granted.
   TTL expiration or first use.
 - **SC-004**: 100% of PAN values are stored encrypted — zero
   plaintext PAN instances exist at rest.
-- **SC-005**: Payment processing completes (including provider
+- **SC-005**: Reveal-and-forward completes (including destination
   round-trip) in under 5 seconds for 95% of requests.
 - **SC-006**: All operations produce audit log entries with
   correlation IDs — zero untracked operations.
 - **SC-007**: Unauthorized detokenization attempts are rejected
   100% of the time.
-- **SC-008**: Duplicate payment requests (same idempotency key)
-  never result in duplicate charges.
+- **SC-008**: [REMOVED — idempotency is the calling client's
+  responsibility.]
 - **SC-009**: System passes PCI DSS compliance review for
   Requirements 3, 4, 7, 8, 10, and 11.
 
