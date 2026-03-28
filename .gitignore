@@ -1,0 +1,37 @@
+# Binaries
+*.exe
+*.test
+*.out
+/tokenizer
+/proxy
+/migrate
+
+# Vendor (if used)
+vendor/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+coverage.out
+coverage.html
+
+# Build
+/bin/
+/dist/
+
+# LocalStack
+.localstack/
+volume/
