@@ -19,9 +19,9 @@ func NewAuditRepo(pool *pgxpool.Pool) *AuditRepo {
 
 func (r *AuditRepo) Append(ctx context.Context, entry *model.AuditLogEntry) error {
 	_, err := r.pool.Exec(ctx,
-		`INSERT INTO audit_log (correlation_id, operation, token_id_masked, actor, result, detail)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		entry.CorrelationID, entry.Operation, entry.TokenIDMasked,
+		`INSERT INTO audit_log (tenant_id, correlation_id, operation, token_id_masked, actor, result, detail)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		entry.TenantID, entry.CorrelationID, entry.Operation, entry.TokenIDMasked,
 		entry.Actor, entry.Result, entry.Detail,
 	)
 	if err != nil {
@@ -30,20 +30,21 @@ func (r *AuditRepo) Append(ctx context.Context, entry *model.AuditLogEntry) erro
 	return nil
 }
 
-func (r *AuditRepo) FindByTokenID(ctx context.Context, tokenIDMasked string, limit, offset int) ([]model.AuditLogEntry, int, error) {
+func (r *AuditRepo) FindByTokenID(ctx context.Context, tenantID, tokenIDMasked string, limit, offset int) ([]model.AuditLogEntry, int, error) {
 	var total int
 	err := r.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM audit_log WHERE token_id_masked = $1`, tokenIDMasked,
+		`SELECT COUNT(*) FROM audit_log WHERE tenant_id = $1 AND token_id_masked = $2`,
+		tenantID, tokenIDMasked,
 	).Scan(&total)
 	if err != nil {
 		return nil, 0, fmt.Errorf("audit count: %w", err)
 	}
 
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, correlation_id, operation, token_id_masked, actor, result, detail, created_at
-		 FROM audit_log WHERE token_id_masked = $1
-		 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
-		tokenIDMasked, limit, offset,
+		`SELECT id, tenant_id, correlation_id, operation, token_id_masked, actor, result, detail, created_at
+		 FROM audit_log WHERE tenant_id = $1 AND token_id_masked = $2
+		 ORDER BY created_at DESC LIMIT $3 OFFSET $4`,
+		tenantID, tokenIDMasked, limit, offset,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("audit query: %w", err)
@@ -53,7 +54,7 @@ func (r *AuditRepo) FindByTokenID(ctx context.Context, tokenIDMasked string, lim
 	var entries []model.AuditLogEntry
 	for rows.Next() {
 		var e model.AuditLogEntry
-		if err := rows.Scan(&e.ID, &e.CorrelationID, &e.Operation, &e.TokenIDMasked,
+		if err := rows.Scan(&e.ID, &e.TenantID, &e.CorrelationID, &e.Operation, &e.TokenIDMasked,
 			&e.Actor, &e.Result, &e.Detail, &e.CreatedAt); err != nil {
 			return nil, 0, fmt.Errorf("audit scan: %w", err)
 		}

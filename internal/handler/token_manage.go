@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/pci-vault/vault/internal/audit"
+	"github.com/pci-vault/vault/internal/auth"
 	"github.com/pci-vault/vault/internal/model"
 	"github.com/pci-vault/vault/internal/repository"
 	"github.com/pci-vault/vault/internal/server"
@@ -43,13 +44,18 @@ func NewTokenManageHandler(
 	}
 }
 
-// GetStatus handles GET /vault/tokens/{token_id}
 func (h *TokenManageHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	correlationID := server.GetCorrelationID(ctx)
 	tokenID := chi.URLParam(r, "token_id")
 
-	token, err := h.tokenRepo.FindByTokenID(ctx, tokenID)
+	tenant := auth.GetTenant(ctx)
+	if tenant == nil {
+		server.BadRequest(w, "MISSING_TENANT", "Tenant context required", correlationID)
+		return
+	}
+
+	token, err := h.tokenRepo.FindByTokenID(ctx, tenant.TenantID, tokenID)
 	if err != nil {
 		server.InternalError(w, correlationID)
 		return
@@ -60,6 +66,7 @@ func (h *TokenManageHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.audit.Log(ctx, &model.AuditLogEntry{
+		TenantID:      tenant.TenantID,
 		CorrelationID: correlationID,
 		Operation:     model.AuditOpValidate,
 		TokenIDMasked: audit.MaskTokenID(tokenID),
@@ -81,13 +88,18 @@ func (h *TokenManageHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// Deactivate handles DELETE /vault/tokens/{token_id}
 func (h *TokenManageHandler) Deactivate(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	correlationID := server.GetCorrelationID(ctx)
 	tokenID := chi.URLParam(r, "token_id")
 
-	token, err := h.tokenRepo.FindByTokenID(ctx, tokenID)
+	tenant := auth.GetTenant(ctx)
+	if tenant == nil {
+		server.BadRequest(w, "MISSING_TENANT", "Tenant context required", correlationID)
+		return
+	}
+
+	token, err := h.tokenRepo.FindByTokenID(ctx, tenant.TenantID, tokenID)
 	if err != nil {
 		server.InternalError(w, correlationID)
 		return
@@ -97,12 +109,13 @@ func (h *TokenManageHandler) Deactivate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := h.tokenRepo.UpdateStatus(ctx, tokenID, model.TokenStatusInactive); err != nil {
+	if err := h.tokenRepo.UpdateStatus(ctx, tenant.TenantID, tokenID, model.TokenStatusInactive); err != nil {
 		server.InternalError(w, correlationID)
 		return
 	}
 
 	h.audit.Log(ctx, &model.AuditLogEntry{
+		TenantID:      tenant.TenantID,
 		CorrelationID: correlationID,
 		Operation:     model.AuditOpDeactivate,
 		TokenIDMasked: audit.MaskTokenID(tokenID),
@@ -118,11 +131,16 @@ func (h *TokenManageHandler) Deactivate(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// GetAuditTrail handles GET /vault/tokens/{token_id}/audit
 func (h *TokenManageHandler) GetAuditTrail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	correlationID := server.GetCorrelationID(ctx)
 	tokenID := chi.URLParam(r, "token_id")
+
+	tenant := auth.GetTenant(ctx)
+	if tenant == nil {
+		server.BadRequest(w, "MISSING_TENANT", "Tenant context required", correlationID)
+		return
+	}
 
 	limit := 50
 	offset := 0
@@ -138,7 +156,7 @@ func (h *TokenManageHandler) GetAuditTrail(w http.ResponseWriter, r *http.Reques
 	}
 
 	maskedID := audit.MaskTokenID(tokenID)
-	entries, total, err := h.auditRepo.FindByTokenID(ctx, maskedID, limit, offset)
+	entries, total, err := h.auditRepo.FindByTokenID(ctx, tenant.TenantID, maskedID, limit, offset)
 	if err != nil {
 		server.InternalError(w, correlationID)
 		return

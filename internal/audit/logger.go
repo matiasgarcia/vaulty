@@ -19,7 +19,7 @@ func NewLogger(repo *repository.AuditRepo) *Logger {
 }
 
 // Log persists an audit entry and emits a structured log line.
-// PAN is masked, CVV is never included.
+// PAN is masked, CVV is never included. TenantID must be set on the entry.
 func (l *Logger) Log(ctx context.Context, entry *model.AuditLogEntry) {
 	if err := l.repo.Append(ctx, entry); err != nil {
 		slog.ErrorContext(ctx, "audit log persist failed",

@@ -14,6 +14,7 @@ const (
 	RoleForward    Role = "forward"
 	RoleManage     Role = "manage"
 	RoleDetokenize Role = "detokenize"
+	RoleAdmin      Role = "admin"
 )
 
 // Service-to-role mapping. In production, this would come from a
@@ -21,7 +22,7 @@ const (
 var serviceRoles = map[string][]Role{
 	"tokenizer": {RoleTokenize, RoleManage, RoleDetokenize},
 	"proxy":     {RoleForward, RoleDetokenize},
-	"admin":     {RoleTokenize, RoleManage},
+	"admin":     {RoleTokenize, RoleManage, RoleAdmin},
 	"client":    {RoleTokenize, RoleForward},
 }
 

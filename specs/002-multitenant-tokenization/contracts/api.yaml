@@ -1,0 +1,176 @@
+openapi: 3.1.0
+info:
+  title: PCI Token Vault — Multitenant Extensions
+  version: 2.0.0
+  description: >
+    New and modified endpoints for multitenant support.
+    All endpoints (except /health and /admin/*) now require
+    an X-Tenant-ID header.
+
+# ─── New: Tenant identification ──────────────────────────────
+
+components:
+  parameters:
+    TenantHeader:
+      name: X-Tenant-ID
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-zA-Z0-9_-]{1,64}$'
+      description: >
+        Mandatory tenant identifier. All data operations are
+        scoped to this tenant. Requests without this header
+        are rejected with 400.
+
+  schemas:
+    TenantRequest:
+      type: object
+      required: [tenant_id, name]
+      properties:
+        tenant_id:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]{1,64}$'
+          description: Unique tenant identifier
+        name:
+          type: string
+          maxLength: 256
+          description: Tenant display name
+
+    TenantResponse:
+      type: object
+      required: [tenant_id, name, status, created_at]
+      properties:
+        tenant_id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, inactive]
+        kms_key_arn:
+          type: string
+          description: Dedicated KMS key ARN (only visible to admin)
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TenantsListResponse:
+      type: object
+      required: [tenants, total]
+      properties:
+        tenants:
+          type: array
+          items:
+            $ref: '#/components/schemas/TenantResponse'
+        total:
+          type: integer
+
+# ─── New endpoints ───────────────────────────────────────────
+
+paths:
+  /admin/tenants:
+    post:
+      operationId: createTenant
+      summary: Provision a new tenant
+      description: >
+        Creates a new tenant, provisions a dedicated KMS key,
+        and stores the tenant record. Requires admin role.
+      tags: [Tenant Management]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantRequest'
+      responses:
+        '201':
+          description: Tenant created with dedicated KMS key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantResponse'
+        '400':
+          description: Invalid tenant_id or name
+        '409':
+          description: Tenant ID already exists
+
+    get:
+      operationId: listTenants
+      summary: List all tenants
+      tags: [Tenant Management]
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Tenant list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantsListResponse'
+
+  /admin/tenants/{tenant_id}:
+    get:
+      operationId: getTenant
+      summary: Get tenant details
+      tags: [Tenant Management]
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Tenant details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantResponse'
+        '404':
+          description: Tenant not found
+
+    delete:
+      operationId: deactivateTenant
+      summary: Deactivate a tenant
+      description: >
+        Sets tenant status to inactive. All operations for this
+        tenant are blocked. Data is preserved for audit.
+        Reversible — tenant can be re-activated.
+      tags: [Tenant Management]
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Tenant deactivated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantResponse'
+        '404':
+          description: Tenant not found
+
+# ─── Modified endpoints (header addition) ────────────────────
+# All existing endpoints now require X-Tenant-ID header:
+#   POST /vault/tokenize        → scoped by tenant
+#   POST /internal/detokenize   → validates token belongs to tenant
+#   GET  /vault/tokens/{id}     → scoped by tenant
+#   DELETE /vault/tokens/{id}   → scoped by tenant
+#   GET  /vault/tokens/{id}/audit → scoped by tenant
+#   POST /proxy/forward         → tenant header forwarded to Tokenizer

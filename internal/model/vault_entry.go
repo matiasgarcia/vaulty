@@ -4,6 +4,7 @@ import "time"
 
 type VaultEntry struct {
 	ID            string    `json:"id"`
+	TenantID      string    `json:"tenant_id"`
 	TokenID       string    `json:"token_id"`
 	PANCiphertext []byte    `json:"-"`
 	IV            []byte    `json:"-"`

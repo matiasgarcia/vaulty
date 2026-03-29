@@ -37,12 +37,29 @@ func New(ctx context.Context, keyARN, region, endpoint string) (*Client, error) 
 	}, nil
 }
 
-// GenerateDataKey generates a new DEK and returns both plaintext and
-// KMS-encrypted copies. Use the plaintext DEK for encryption, store
-// the encrypted DEK alongside the ciphertext.
+// CreateKey provisions a new KMS key and returns its ARN.
+// Used during tenant provisioning to create a per-tenant KEK.
+func (c *Client) CreateKey(ctx context.Context, description string) (string, error) {
+	out, err := c.kmsClient.CreateKey(ctx, &kms.CreateKeyInput{
+		Description: &description,
+		KeyUsage:    "ENCRYPT_DECRYPT",
+		KeySpec:     "SYMMETRIC_DEFAULT",
+	})
+	if err != nil {
+		return "", fmt.Errorf("kms create key: %w", err)
+	}
+	return *out.KeyMetadata.Arn, nil
+}
+
+// GenerateDataKey generates a new DEK using the client's default key ARN.
 func (c *Client) GenerateDataKey(ctx context.Context) (plaintext, encrypted []byte, err error) {
+	return c.GenerateDataKeyWithARN(ctx, c.keyARN)
+}
+
+// GenerateDataKeyWithARN generates a new DEK using a specific key ARN (per-tenant KEK).
+func (c *Client) GenerateDataKeyWithARN(ctx context.Context, keyARN string) (plaintext, encrypted []byte, err error) {
 	out, err := c.kmsClient.GenerateDataKey(ctx, &kms.GenerateDataKeyInput{
-		KeyId:   &c.keyARN,
+		KeyId:   &keyARN,
 		KeySpec: "AES_256",
 	})
 	if err != nil {

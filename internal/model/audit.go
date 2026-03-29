@@ -25,6 +25,7 @@ const (
 
 type AuditLogEntry struct {
 	ID            string          `json:"id"`
+	TenantID      string          `json:"tenant_id"`
 	CorrelationID string          `json:"correlation_id"`
 	Operation     AuditOperation  `json:"operation"`
 	TokenIDMasked string          `json:"token_id_masked,omitempty"`

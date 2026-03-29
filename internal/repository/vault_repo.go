@@ -20,9 +20,9 @@ func NewVaultRepo(pool *pgxpool.Pool) *VaultRepo {
 
 func (r *VaultRepo) Create(ctx context.Context, ve *model.VaultEntry) error {
 	_, err := r.pool.Exec(ctx,
-		`INSERT INTO vault_entries (token_id, pan_ciphertext, iv, auth_tag, dek_encrypted, kms_key_id)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		ve.TokenID, ve.PANCiphertext, ve.IV, ve.AuthTag, ve.DEKEncrypted, ve.KMSKeyID,
+		`INSERT INTO vault_entries (tenant_id, token_id, pan_ciphertext, iv, auth_tag, dek_encrypted, kms_key_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		ve.TenantID, ve.TokenID, ve.PANCiphertext, ve.IV, ve.AuthTag, ve.DEKEncrypted, ve.KMSKeyID,
 	)
 	if err != nil {
 		return fmt.Errorf("vault entry create: %w", err)
@@ -30,11 +30,11 @@ func (r *VaultRepo) Create(ctx context.Context, ve *model.VaultEntry) error {
 	return nil
 }
 
-func (r *VaultRepo) FindByTokenID(ctx context.Context, tokenID string) (*model.VaultEntry, error) {
+func (r *VaultRepo) FindByTokenID(ctx context.Context, tenantID, tokenID string) (*model.VaultEntry, error) {
 	var ve model.VaultEntry
 	err := r.pool.QueryRow(ctx,
 		`SELECT id, token_id, pan_ciphertext, iv, auth_tag, dek_encrypted, kms_key_id, created_at
-		 FROM vault_entries WHERE token_id = $1`, tokenID,
+		 FROM vault_entries WHERE tenant_id = $1 AND token_id = $2`, tenantID, tokenID,
 	).Scan(&ve.ID, &ve.TokenID, &ve.PANCiphertext, &ve.IV, &ve.AuthTag,
 		&ve.DEKEncrypted, &ve.KMSKeyID, &ve.CreatedAt)
 	if err == pgx.ErrNoRows {
@@ -43,5 +43,6 @@ func (r *VaultRepo) FindByTokenID(ctx context.Context, tokenID string) (*model.V
 	if err != nil {
 		return nil, fmt.Errorf("vault entry find: %w", err)
 	}
+	ve.TenantID = tenantID
 	return &ve, nil
 }
