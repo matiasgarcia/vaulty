@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/pci-vault/vault/internal/audit"
 	"github.com/pci-vault/vault/internal/auth"
 	"github.com/pci-vault/vault/internal/model"
+	vaultredis "github.com/pci-vault/vault/internal/redis"
 	"github.com/pci-vault/vault/internal/repository"
 	"github.com/pci-vault/vault/internal/server"
 )
@@ -17,8 +19,10 @@ import (
 type TokenStatusResponse struct {
 	Token      string  `json:"token"`
 	Status     string  `json:"status"`
-	CreatedAt  string  `json:"created_at"`
+	Type       string  `json:"type"`
+	CreatedAt  string  `json:"created_at,omitempty"`
 	LastUsedAt *string `json:"last_used_at,omitempty"`
+	TTLSeconds *int    `json:"ttl_seconds,omitempty"`
 }
 
 type AuditTrailResponse struct {
@@ -29,17 +33,20 @@ type AuditTrailResponse struct {
 type TokenManageHandler struct {
 	tokenRepo *repository.TokenRepo
 	auditRepo *repository.AuditRepo
+	cvvStore  *vaultredis.CVVStore
 	audit     *audit.Logger
 }
 
 func NewTokenManageHandler(
 	tokenRepo *repository.TokenRepo,
 	auditRepo *repository.AuditRepo,
+	cvvStore *vaultredis.CVVStore,
 	auditLogger *audit.Logger,
 ) *TokenManageHandler {
 	return &TokenManageHandler{
 		tokenRepo: tokenRepo,
 		auditRepo: auditRepo,
+		cvvStore:  cvvStore,
 		audit:     auditLogger,
 	}
 }
@@ -55,37 +62,62 @@ func (h *TokenManageHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Try PAN token first (PostgreSQL)
 	token, err := h.tokenRepo.FindByTokenID(ctx, tenant.TenantID, tokenID)
 	if err != nil {
 		server.InternalError(w, correlationID)
 		return
 	}
-	if token == nil {
-		server.NotFound(w, "TOKEN_NOT_FOUND", "Token not found", correlationID)
+
+	if token != nil {
+		h.audit.Log(ctx, &model.AuditLogEntry{
+			TenantID:      tenant.TenantID,
+			CorrelationID: correlationID,
+			Operation:     model.AuditOpValidate,
+			TokenIDMasked: audit.MaskTokenID(tokenID),
+			Actor:         "api",
+			Result:        model.AuditResultSuccess,
+		})
+
+		resp := TokenStatusResponse{
+			Token:     token.TokenID,
+			Status:    string(token.Status),
+			Type:      "pan",
+			CreatedAt: token.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		}
+		if token.LastUsedAt != nil {
+			ts := token.LastUsedAt.Format("2006-01-02T15:04:05Z07:00")
+			resp.LastUsedAt = &ts
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 		return
 	}
 
-	h.audit.Log(ctx, &model.AuditLogEntry{
-		TenantID:      tenant.TenantID,
-		CorrelationID: correlationID,
-		Operation:     model.AuditOpValidate,
-		TokenIDMasked: audit.MaskTokenID(tokenID),
-		Actor:         "api",
-		Result:        model.AuditResultSuccess,
-	})
+	// Try CVV token (Redis)
+	if ttl, exists := h.cvvStore.ExistsCVVToken(ctx, tenant.TenantID, tokenID); exists {
+		h.audit.Log(ctx, &model.AuditLogEntry{
+			TenantID:      tenant.TenantID,
+			CorrelationID: correlationID,
+			Operation:     model.AuditOpValidate,
+			TokenIDMasked: audit.MaskTokenID(tokenID),
+			Actor:         "api",
+			Result:        model.AuditResultSuccess,
+		})
 
-	resp := TokenStatusResponse{
-		Token:     token.TokenID,
-		Status:    string(token.Status),
-		CreatedAt: token.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-	}
-	if token.LastUsedAt != nil {
-		ts := token.LastUsedAt.Format("2006-01-02T15:04:05Z07:00")
-		resp.LastUsedAt = &ts
+		ttlSec := int(ttl / time.Second)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(TokenStatusResponse{
+			Token:      tokenID,
+			Status:     "active",
+			Type:       "cvv",
+			TTLSeconds: &ttlSec,
+		})
+		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	server.NotFound(w, "TOKEN_NOT_FOUND", "Token not found", correlationID)
 }
 
 func (h *TokenManageHandler) Deactivate(w http.ResponseWriter, r *http.Request) {

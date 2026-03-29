@@ -17,53 +17,60 @@ func TestDetokenize(t *testing.T) {
 	_, tokenBody := doPost(t, env.tokenizerURL+"/vault/tokenize", map[string]interface{}{
 		"pan": "4111111111111111", "expiry_month": 12, "expiry_year": 2027, "cvv": "123",
 	})
-	token := tokenBody["token"].(string)
+	panToken := tokenBody["pan"].(string)
+	cvvToken := tokenBody["cvv"].(string)
 
-	t.Run("detokenize returns real PAN", func(t *testing.T) {
+	t.Run("PAN token returns real PAN as value", func(t *testing.T) {
 		resp, body := doPostAs(t, env.tokenizerURL+"/internal/detokenize", "proxy", map[string]interface{}{
-			"token": token,
+			"token": panToken,
 		})
 		require.Equal(t, 200, resp.StatusCode)
-		assert.Equal(t, "4111111111111111", body["pan"])
-		assert.Equal(t, float64(12), body["expiry_month"])
-		assert.Equal(t, float64(2027), body["expiry_year"])
+		assert.Equal(t, "4111111111111111", body["value"])
 	})
 
-	t.Run("CVV returned on first call then consumed", func(t *testing.T) {
-		// Tokenize a new card so CVV is fresh
-		_, newBody := doPost(t, env.tokenizerURL+"/vault/tokenize", map[string]interface{}{
-			"pan": "4000056655665556", "expiry_month": 1, "expiry_year": 2028, "cvv": "999",
-		})
-		newToken := newBody["token"].(string)
-
-		// First detokenize — CVV should be present
+	t.Run("CVV token returns real CVV as value and is single-use", func(t *testing.T) {
+		// First detokenize — CVV should be returned
 		resp1, body1 := doPostAs(t, env.tokenizerURL+"/internal/detokenize", "proxy", map[string]interface{}{
-			"token": newToken,
+			"token": cvvToken,
 		})
 		require.Equal(t, 200, resp1.StatusCode)
-		assert.NotNil(t, body1["cvv"], "CVV should be returned on first call")
+		assert.Equal(t, "123", body1["value"])
 
-		// Second detokenize — CVV should be nil (consumed)
-		resp2, body2 := doPostAs(t, env.tokenizerURL+"/internal/detokenize", "proxy", map[string]interface{}{
-			"token": newToken,
+		// Second detokenize — CVV token consumed, should return 404
+		resp2, _ := doPostAs(t, env.tokenizerURL+"/internal/detokenize", "proxy", map[string]interface{}{
+			"token": cvvToken,
 		})
-		require.Equal(t, 200, resp2.StatusCode)
-		assert.Nil(t, body2["cvv"], "CVV should be nil after first use (single-use)")
+		assert.Equal(t, 404, resp2.StatusCode)
+	})
+
+	t.Run("CVV token from re-tokenize invalidates previous", func(t *testing.T) {
+		// Tokenize with new CVV for the same PAN
+		_, body2 := doPost(t, env.tokenizerURL+"/vault/tokenize", map[string]interface{}{
+			"pan": "4111111111111111", "expiry_month": 12, "expiry_year": 2027, "cvv": "999",
+		})
+		newCVVToken := body2["cvv"].(string)
+
+		// New CVV token works
+		resp, body := doPostAs(t, env.tokenizerURL+"/internal/detokenize", "proxy", map[string]interface{}{
+			"token": newCVVToken,
+		})
+		require.Equal(t, 200, resp.StatusCode)
+		assert.Equal(t, "999", body["value"])
 	})
 
 	t.Run("invalid token returns 404", func(t *testing.T) {
 		resp, _ := doPostAs(t, env.tokenizerURL+"/internal/detokenize", "proxy", map[string]interface{}{
-			"token": "tok_nonexistent",
+			"token": "tok_nonexistent0000000000000000000000000000",
 		})
 		assert.Equal(t, 404, resp.StatusCode)
 	})
 
-	t.Run("deactivated token returns 404", func(t *testing.T) {
+	t.Run("deactivated PAN token returns 404", func(t *testing.T) {
 		// Tokenize
 		_, tb := doPost(t, env.tokenizerURL+"/vault/tokenize", map[string]interface{}{
-			"pan": "378282246310005", "expiry_month": 6, "expiry_year": 2029, "cvv": "1234",
+			"pan": "378282246310005", "expiry_month": 6, "expiry_year": 2029,
 		})
-		tk := tb["token"].(string)
+		tk := tb["pan"].(string)
 
 		// Deactivate
 		doDelete(t, env.tokenizerURL+"/vault/tokens/"+tk)

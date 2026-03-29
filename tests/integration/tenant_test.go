@@ -89,14 +89,14 @@ func TestTenantProvisioning(t *testing.T) {
 			"pan": "4111111111111111", "expiry_month": 12, "expiry_year": 2027, "cvv": "123",
 		})
 		require.Equal(t, 201, respA.StatusCode)
-		tokenA := bodyA["token"].(string)
+		tokenA := bodyA["pan"].(string)
 
 		// Tokenize same PAN from tenant-b
 		respB, bodyB := doPostWithTenant(t, env.tokenizerURL+"/vault/tokenize", "tenant-b", map[string]interface{}{
 			"pan": "4111111111111111", "expiry_month": 12, "expiry_year": 2027, "cvv": "456",
 		})
 		require.Equal(t, 201, respB.StatusCode)
-		tokenB := bodyB["token"].(string)
+		tokenB := bodyB["pan"].(string)
 
 		// Different tokens
 		assert.NotEqual(t, tokenA, tokenB, "same PAN different tenants must produce different tokens")
@@ -106,7 +106,7 @@ func TestTenantProvisioning(t *testing.T) {
 			"pan": "4111111111111111", "expiry_month": 12, "expiry_year": 2027, "cvv": "789",
 		})
 		require.Equal(t, 200, respA2.StatusCode)
-		assert.Equal(t, tokenA, bodyA2["token"], "same PAN same tenant must return same token")
+		assert.Equal(t, tokenA, bodyA2["pan"], "same PAN same tenant must return same token")
 	})
 }
 

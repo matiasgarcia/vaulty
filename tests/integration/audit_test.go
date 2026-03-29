@@ -19,10 +19,10 @@ func TestAudit(t *testing.T) {
 	_, tokenBody := doPost(t, env.tokenizerURL+"/vault/tokenize", map[string]interface{}{
 		"pan": "4111111111111111", "expiry_month": 12, "expiry_year": 2027, "cvv": "123",
 	})
-	token := tokenBody["token"].(string)
+	panToken := tokenBody["pan"].(string)
 
 	t.Run("tokenize creates audit entry", func(t *testing.T) {
-		resp, body := doGet(t, env.tokenizerURL+"/vault/tokens/"+token+"/audit")
+		resp, body := doGet(t, env.tokenizerURL+"/vault/tokens/"+panToken+"/audit")
 		require.Equal(t, 200, resp.StatusCode)
 
 		entries := body["entries"].([]interface{})
@@ -45,10 +45,10 @@ func TestAudit(t *testing.T) {
 	t.Run("detokenize creates audit entry", func(t *testing.T) {
 		// Detokenize
 		doPostAs(t, env.tokenizerURL+"/internal/detokenize", "proxy", map[string]interface{}{
-			"token": token,
+			"token": panToken,
 		})
 
-		resp, body := doGet(t, env.tokenizerURL+"/vault/tokens/"+token+"/audit")
+		resp, body := doGet(t, env.tokenizerURL+"/vault/tokens/"+panToken+"/audit")
 		require.Equal(t, 200, resp.StatusCode)
 
 		entries := body["entries"].([]interface{})
@@ -64,7 +64,7 @@ func TestAudit(t *testing.T) {
 	})
 
 	t.Run("PAN masked in audit entries", func(t *testing.T) {
-		resp, body := doGet(t, env.tokenizerURL+"/vault/tokens/"+token+"/audit")
+		resp, body := doGet(t, env.tokenizerURL+"/vault/tokens/"+panToken+"/audit")
 		require.Equal(t, 200, resp.StatusCode)
 
 		raw, _ := json.Marshal(body)
@@ -75,13 +75,13 @@ func TestAudit(t *testing.T) {
 	})
 
 	t.Run("CVV never appears in audit", func(t *testing.T) {
-		resp, body := doGet(t, env.tokenizerURL+"/vault/tokens/"+token+"/audit")
+		resp, body := doGet(t, env.tokenizerURL+"/vault/tokens/"+panToken+"/audit")
 		require.Equal(t, 200, resp.StatusCode)
 
 		raw, _ := json.Marshal(body)
 		rawStr := strings.ToLower(string(raw))
 
-		// CVV field name should never appear in audit
-		assert.NotContains(t, rawStr, "\"cvv\"")
+		// CVV value should never appear in audit
+		assert.NotContains(t, rawStr, "\"123\"")
 	})
 }

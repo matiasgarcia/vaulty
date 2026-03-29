@@ -154,7 +154,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 	detokenizeH := handler.NewDetokenizeHandler(
 		tokenRepo, vaultRepo, cvvStore, kmsClient, auditLogger,
 	)
-	tokenManageH := handler.NewTokenManageHandler(tokenRepo, auditRepo, auditLogger)
+	tokenManageH := handler.NewTokenManageHandler(tokenRepo, auditRepo, cvvStore, auditLogger)
 	healthH := handler.NewHealthHandler(pool, rdb, func(ctx context.Context) bool { return true })
 
 	tenantH := handler.NewTenantHandler(tenantRepo, kmsClient)

@@ -75,7 +75,7 @@ func main() {
 	detokenizeHandler := handler.NewDetokenizeHandler(
 		tokenRepo, vaultRepo, cvvStore, kmsClient, auditLogger,
 	)
-	tokenManageHandler := handler.NewTokenManageHandler(tokenRepo, auditRepo, auditLogger)
+	tokenManageHandler := handler.NewTokenManageHandler(tokenRepo, auditRepo, cvvStore, auditLogger)
 	healthHandler := handler.NewHealthHandler(pool, rdb, func(ctx context.Context) bool {
 		_, _, err := kmsClient.GenerateDataKey(ctx)
 		return err == nil
