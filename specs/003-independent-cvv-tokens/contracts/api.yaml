@@ -1,0 +1,486 @@
+openapi: 3.1.0
+info:
+  title: PCI Token Vault & Payment Proxy API
+  version: 2.0.0
+  description: >
+    PCI DSS-compliant tokenization vault and payment proxy.
+    v2.0.0: Dynamic echo tokenization with independent CVV tokens.
+
+servers:
+  - url: https://vault.internal
+    description: CDE internal (mTLS required)
+
+security:
+  - BearerAuth: []
+
+paths:
+  /vault/tokenize:
+    post:
+      operationId: tokenize
+      summary: Tokenize sensitive fields in an arbitrary JSON body
+      description: >
+        Accepts an arbitrary JSON object. Scans top-level fields for
+        known sensitive field names (`pan`, `cvv`). Replaces each
+        sensitive value with a corresponding token. Returns the full
+        body with sensitive values replaced and all other fields echoed
+        unchanged.
+
+        - `pan`: Validated (Luhn, 13-19 digits), encrypted, stored
+          permanently. Same PAN always returns the same token
+          (deterministic via blind index). If `expiry_month` and
+          `expiry_year` are present, they are stored as PAN metadata.
+        - `cvv`: Validated (3-4 digits), encrypted, stored in Redis
+          with configurable TTL (default 1h). Single-use. Each
+          tokenization produces a new CVV token.
+
+        At least one sensitive field (`pan` or `cvv`) must be present.
+      tags: [Tokenization]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: >
+                Arbitrary JSON object. Must contain at least one of
+                `pan` or `cvv` at the top level. All other fields are
+                passed through unchanged.
+              examples:
+                pan-and-cvv:
+                  summary: Full card tokenization
+                  value:
+                    pan: "4111111111111111"
+                    expiry_month: 12
+                    expiry_year: 2027
+                    cvv: "123"
+                    amount: 5000
+                    currency: "USD"
+                pan-only:
+                  summary: PAN-only tokenization
+                  value:
+                    pan: "4111111111111111"
+                    expiry_month: 12
+                    expiry_year: 2027
+                cvv-only:
+                  summary: CVV-only tokenization
+                  value:
+                    cvv: "456"
+      responses:
+        '200':
+          description: >
+            Existing PAN token returned (PAN was already tokenized).
+            CVV token is always new. Non-sensitive fields echoed.
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Echo of request body with sensitive fields replaced by tokens
+                examples:
+                  pan-and-cvv:
+                    value:
+                      pan: "tok_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0"
+                      expiry_month: 12
+                      expiry_year: 2027
+                      cvv: "tok_z9y8x7w6v5u4t3s2r1q0p9o8n7m6l5k4j3i2h1g0"
+                      amount: 5000
+                      currency: "USD"
+        '201':
+          description: >
+            New PAN token created. CVV token created if CVV provided.
+            Non-sensitive fields echoed.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: >
+            Validation error — no sensitive fields present, invalid PAN
+            (Luhn), invalid CVV (not 3-4 digits), etc.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: KMS unavailable — cannot encrypt safely
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /vault/tokens/{token_id}:
+    get:
+      operationId: getTokenStatus
+      summary: Validate token existence and status
+      description: >
+        Works for both PAN tokens and CVV tokens. PAN tokens return
+        status from PostgreSQL. CVV tokens return availability from
+        Redis (available or expired/consumed).
+      tags: [Token Management]
+      parameters:
+        - $ref: '#/components/parameters/TokenId'
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Token status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenStatusResponse'
+        '404':
+          description: Token not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      operationId: deactivateToken
+      summary: Deactivate a token (soft-delete)
+      description: >
+        For PAN tokens: sets status to inactive (irreversible).
+        For CVV tokens: deletes from Redis immediately.
+      tags: [Token Management]
+      parameters:
+        - $ref: '#/components/parameters/TokenId'
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Token deactivated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenStatusResponse'
+        '404':
+          description: Token not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /vault/tokens/{token_id}/audit:
+    get:
+      operationId: getTokenAuditTrail
+      summary: Retrieve audit trail for a token
+      tags: [Audit]
+      parameters:
+        - $ref: '#/components/parameters/TokenId'
+        - $ref: '#/components/parameters/TenantId'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditTrailResponse'
+
+  /internal/detokenize:
+    post:
+      operationId: detokenize
+      summary: Reveal a PAN or CVV token (internal, mTLS-only)
+      description: >
+        Internal endpoint exposed by the Tokenizer service. Only
+        accessible via mTLS from the Payment Proxy.
+
+        Resolves any token (PAN or CVV) to its plain string value.
+        PAN tokens return the raw PAN. CVV tokens return the raw CVV
+        (single-use via GETDEL). The proxy replaces the token in the
+        payload with this plain string value.
+      tags: [Internal]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+                  description: Token to detokenize (PAN or CVV)
+      responses:
+        '200':
+          description: Detokenized plain string value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetokenizeResponse'
+        '404':
+          description: Token not found, inactive, expired, or consumed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller not authorized (non-Proxy mTLS cert)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /proxy/forward:
+    post:
+      operationId: forwardWithReveal
+      summary: Reveal tokens and forward to 3rd party provider
+      description: >
+        Stateless reveal-and-forward pipe. Scans payload for `tok_`
+        patterns. For each token found, calls `/internal/detokenize`
+        and replaces the token with the returned plain string value
+        (raw PAN or raw CVV). Forwards the modified payload to the
+        destination and returns the provider's response verbatim.
+      tags: [Proxy]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForwardRequest'
+      responses:
+        '200':
+          description: Provider response (verbatim pass-through)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ForwardResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Token not found, expired, or consumed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: Destination provider unreachable or error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      tags: [Operations]
+      security: []
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+
+  parameters:
+    TokenId:
+      name: token_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^tok_[a-zA-Z0-9]{32,}$'
+
+    TenantId:
+      name: X-Tenant-ID
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-zA-Z0-9_-]{1,64}$'
+
+  responses:
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    DetokenizeResponse:
+      type: object
+      required: [value]
+      properties:
+        value:
+          type: string
+          description: >
+            Plain string value. For PAN tokens: the raw PAN
+            (e.g., "4111111111111111"). For CVV tokens: the raw
+            CVV (e.g., "123").
+
+    TokenStatusResponse:
+      type: object
+      required: [token, status]
+      properties:
+        token:
+          type: string
+        status:
+          type: string
+          enum: [active, inactive, expired, consumed]
+          description: >
+            PAN tokens: active or inactive.
+            CVV tokens: active (available), expired, or consumed.
+        type:
+          type: string
+          enum: [pan, cvv]
+          description: Token type
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Only for CVV tokens — when the token expires
+        ttl_seconds:
+          type: integer
+          nullable: true
+          description: Only for CVV tokens — remaining TTL in seconds
+
+    ForwardRequest:
+      type: object
+      required: [destination, payload]
+      properties:
+        destination:
+          type: string
+          format: uri
+        method:
+          type: string
+          enum: [POST, PUT, PATCH]
+          default: POST
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        payload:
+          type: object
+          description: >
+            Arbitrary JSON payload. String values matching `tok_`
+            pattern are revealed and replaced with their plain
+            string values (raw PAN or raw CVV).
+
+    ForwardResponse:
+      type: object
+      required: [status_code, body]
+      properties:
+        status_code:
+          type: integer
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        body:
+          type: object
+          nullable: true
+
+    AuditTrailResponse:
+      type: object
+      required: [entries, total]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEntry'
+        total:
+          type: integer
+
+    AuditEntry:
+      type: object
+      required: [id, operation, actor, result, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        correlation_id:
+          type: string
+        operation:
+          type: string
+          enum: [tokenize, detokenize, deactivate, validate, forward]
+        actor:
+          type: string
+        result:
+          type: string
+          enum: [success, denied, error]
+        detail:
+          type: object
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [healthy, unhealthy]
+        checks:
+          type: object
+          properties:
+            database:
+              type: string
+              enum: [up, down]
+            redis:
+              type: string
+              enum: [up, down]
+            kms:
+              type: string
+              enum: [up, down]
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            correlation_id:
+              type: string

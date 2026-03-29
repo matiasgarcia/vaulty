@@ -21,13 +21,13 @@ func TestForward(t *testing.T) {
 	_, tokenBody := doPost(t, env.tokenizerURL+"/vault/tokenize", map[string]interface{}{
 		"pan": "4111111111111111", "expiry_month": 12, "expiry_year": 2027, "cvv": "123",
 	})
-	token := tokenBody["token"].(string)
+	panToken := tokenBody["pan"].(string)
+	cvvToken := tokenBody["cvv"].(string)
 
-	t.Run("forward reveals token and sends real PAN to destination", func(t *testing.T) {
+	t.Run("forward reveals PAN and CVV tokens independently", func(t *testing.T) {
 		var mu sync.Mutex
 		var received map[string]interface{}
 
-		// In-process mock destination
 		mockDest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var body map[string]interface{}
 			json.NewDecoder(r.Body).Decode(&body)
@@ -35,15 +35,16 @@ func TestForward(t *testing.T) {
 			received = body
 			mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "mock": true})
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		}))
 		defer mockDest.Close()
 
 		resp, body := doPost(t, env.proxyURL+"/proxy/forward", map[string]interface{}{
 			"destination": mockDest.URL,
 			"payload": map[string]interface{}{
-				"card":   token,
-				"amount": 5000,
+				"card_number":   panToken,
+				"security_code": cvvToken,
+				"amount":        5000,
 			},
 		})
 
@@ -54,11 +55,12 @@ func TestForward(t *testing.T) {
 		defer mu.Unlock()
 		require.NotNil(t, received, "mock destination should have received payload")
 
-		// The token should have been replaced with revealed card data
-		cardData, ok := received["card"].(map[string]interface{})
-		require.True(t, ok, "card field should be an object with revealed data")
-		assert.Equal(t, "4111111111111111", cardData["pan"])
-		assert.Equal(t, float64(12), cardData["expiry_month"])
+		// PAN token replaced with plain PAN string
+		assert.Equal(t, "4111111111111111", received["card_number"])
+		// CVV token replaced with plain CVV string
+		assert.Equal(t, "123", received["security_code"])
+		// Non-token fields unchanged
+		assert.Equal(t, float64(5000), received["amount"])
 	})
 
 	t.Run("forward with no tokens passes payload unchanged", func(t *testing.T) {
@@ -80,6 +82,22 @@ func TestForward(t *testing.T) {
 		assert.Equal(t, "John Doe", received["name"])
 	})
 
+	t.Run("forward with consumed CVV token returns error", func(t *testing.T) {
+		// CVV token was already consumed in the first subtest
+		mockDest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("destination should not be called for consumed token")
+		}))
+		defer mockDest.Close()
+
+		resp, _ := doPost(t, env.proxyURL+"/proxy/forward", map[string]interface{}{
+			"destination": mockDest.URL,
+			"payload": map[string]interface{}{
+				"security_code": cvvToken,
+			},
+		})
+		assert.Equal(t, 404, resp.StatusCode)
+	})
+
 	t.Run("forward with invalid token returns error", func(t *testing.T) {
 		mockDest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			t.Error("destination should not be called for invalid token")
@@ -89,7 +107,7 @@ func TestForward(t *testing.T) {
 		resp, _ := doPost(t, env.proxyURL+"/proxy/forward", map[string]interface{}{
 			"destination": mockDest.URL,
 			"payload": map[string]interface{}{
-				"card": "tok_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"card": "tok_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			},
 		})
 		assert.Equal(t, 404, resp.StatusCode)

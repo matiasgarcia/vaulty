@@ -12,12 +12,9 @@ import (
 
 var tokenPattern = regexp.MustCompile(`^tok_[a-zA-Z0-9]{32,}$`)
 
-// DetokenizeResult holds the revealed data for a single token.
+// DetokenizeResult holds the plain string value for a revealed token.
 type DetokenizeResult struct {
-	PAN         string  `json:"pan"`
-	ExpiryMonth int     `json:"expiry_month"`
-	ExpiryYear  int     `json:"expiry_year"`
-	CVV         *string `json:"cvv"`
+	Value string `json:"value"`
 }
 
 // Revealer scans JSON payloads for token patterns and reveals them
@@ -38,7 +35,7 @@ func NewRevealer(client *http.Client, tokenizerBaseURL, authHeader string) *Reve
 
 // ScanAndReveal recursively walks a JSON payload, finds string values
 // matching the token pattern, calls detokenize for each, and replaces
-// the token value with the revealed card data.
+// the token value with the plain string value (raw PAN or raw CVV).
 func (rv *Revealer) ScanAndReveal(ctx context.Context, tenantID string, payload interface{}) (interface{}, error) {
 	switch v := payload.(type) {
 	case map[string]interface{}:
@@ -67,16 +64,7 @@ func (rv *Revealer) ScanAndReveal(ctx context.Context, tenantID string, payload 
 			if err != nil {
 				return nil, fmt.Errorf("detokenize %s: %w", v[:12]+"...", err)
 			}
-			// Replace token string with revealed data object
-			revealed := map[string]interface{}{
-				"pan":          result.PAN,
-				"expiry_month": result.ExpiryMonth,
-				"expiry_year":  result.ExpiryYear,
-			}
-			if result.CVV != nil {
-				revealed["cvv"] = *result.CVV
-			}
-			return revealed, nil
+			return result.Value, nil
 		}
 		return v, nil
 

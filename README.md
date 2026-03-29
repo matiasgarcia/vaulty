@@ -128,6 +128,8 @@ curl -X POST http://localhost:8080/admin/tenants \
 
 ### Tokenize a card
 
+The tokenize endpoint accepts an arbitrary JSON body. It scans top-level fields for `pan` and `cvv`, tokenizes them independently, and echoes everything else unchanged.
+
 ```bash
 curl -X POST http://localhost:8080/vault/tokenize \
   -H "Content-Type: application/json" \
@@ -137,11 +139,38 @@ curl -X POST http://localhost:8080/vault/tokenize \
     "pan": "4111111111111111",
     "expiry_month": 12,
     "expiry_year": 2027,
-    "cvv": "123"
+    "cvv": "123",
+    "amount": 5000,
+    "currency": "USD"
   }'
 ```
 
+Response (201 Created):
+```json
+{
+  "pan": "tok_a1b2c3...",
+  "expiry_month": 12,
+  "expiry_year": 2027,
+  "cvv": "tok_z9y8x7...",
+  "amount": 5000,
+  "currency": "USD"
+}
+```
+
+You can also tokenize only PAN or only CVV:
+
+```bash
+# CVV-only
+curl -X POST http://localhost:8080/vault/tokenize \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer client:secret" \
+  -H "X-Tenant-ID: merchant-a" \
+  -d '{"cvv": "456"}'
+```
+
 ### Forward with token reveal
+
+Place PAN and CVV tokens independently in your payload:
 
 ```bash
 curl -X POST http://localhost:8081/proxy/forward \
@@ -151,14 +180,25 @@ curl -X POST http://localhost:8081/proxy/forward \
   -d '{
     "destination": "http://localhost:9090/receive",
     "payload": {
-      "card": "tok_XXXXXXXXXX",
+      "card_number": "tok_a1b2c3...",
+      "security_code": "tok_z9y8x7...",
       "amount": 5000,
       "currency": "USD"
     }
   }'
 ```
 
-The proxy scans `payload` for any `tok_...` values, reveals them (replaces with real PAN/expiry/CVV), and forwards the entire payload to the destination.
+The proxy scans `payload` for any `tok_...` values and replaces each with its plain string value (raw PAN or raw CVV). The destination receives:
+```json
+{
+  "card_number": "4111111111111111",
+  "security_code": "123",
+  "amount": 5000,
+  "currency": "USD"
+}
+```
+
+**CVV tokens are single-use** — once revealed, the CVV token is consumed and cannot be used again. CVV tokens expire after 1 hour.
 
 ## Multitenancy
 

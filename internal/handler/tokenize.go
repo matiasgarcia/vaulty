@@ -20,19 +20,6 @@ import (
 	"github.com/pci-vault/vault/internal/server"
 )
 
-type TokenizeRequest struct {
-	PAN         string `json:"pan"`
-	ExpiryMonth int    `json:"expiry_month"`
-	ExpiryYear  int    `json:"expiry_year"`
-	CVV         string `json:"cvv"`
-}
-
-type TokenizeResponse struct {
-	Token      string `json:"token"`
-	CVVStored  bool   `json:"cvv_stored"`
-	IsExisting bool   `json:"is_existing"`
-}
-
 type TokenizeHandler struct {
 	tokenRepo *repository.TokenRepo
 	vaultRepo *repository.VaultRepo
@@ -70,29 +57,16 @@ func (h *TokenizeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	correlationID := server.GetCorrelationID(ctx)
 
-	var req TokenizeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		server.BadRequest(w, "INVALID_JSON", "Invalid request body", correlationID)
 		return
 	}
 
-	if !validatePAN(req.PAN) {
-		server.BadRequest(w, "INVALID_PAN", "PAN failed Luhn validation", correlationID)
-		return
-	}
-
-	if req.ExpiryMonth < 1 || req.ExpiryMonth > 12 {
-		server.BadRequest(w, "INVALID_EXPIRY", "Expiry month must be 1-12", correlationID)
-		return
-	}
-
-	if req.ExpiryYear < time.Now().Year() {
-		server.BadRequest(w, "INVALID_EXPIRY", "Card is expired", correlationID)
-		return
-	}
-
-	if len(req.CVV) < 3 || len(req.CVV) > 4 {
-		server.BadRequest(w, "INVALID_CVV", "CVV must be 3-4 digits", correlationID)
+	_, hasPAN := body["pan"]
+	_, hasCVV := body["cvv"]
+	if !hasPAN && !hasCVV {
+		server.BadRequest(w, "NO_SENSITIVE_FIELDS", "Request must contain at least one of: pan, cvv", correlationID)
 		return
 	}
 
@@ -104,86 +78,123 @@ func (h *TokenizeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenant.TenantID
 	kmsKeyARN := tenant.KMSKeyARN
 
-	blindIndex := crypto.ComputeBlindIndex(tenantID, req.PAN, h.hmacKey)
+	// Track whether a new PAN token was created (for HTTP status code)
+	newPANToken := false
+	var panTokenID string
 
-	existing, err := h.tokenRepo.FindByBlindIndex(ctx, tenantID, blindIndex)
-	if err != nil {
-		server.InternalError(w, correlationID)
-		return
+	// Process PAN if present
+	if hasPAN {
+		panStr, ok := body["pan"].(string)
+		if !ok {
+			server.BadRequest(w, "INVALID_PAN", "PAN must be a string", correlationID)
+			return
+		}
+		if !validatePAN(panStr) {
+			server.BadRequest(w, "INVALID_PAN", "PAN failed Luhn validation", correlationID)
+			return
+		}
+
+		blindIndex := crypto.ComputeBlindIndex(tenantID, panStr, h.hmacKey)
+		existing, err := h.tokenRepo.FindByBlindIndex(ctx, tenantID, blindIndex)
+		if err != nil {
+			server.InternalError(w, correlationID)
+			return
+		}
+
+		if existing != nil {
+			panTokenID = existing.TokenID
+		} else {
+			tokenID, err := generateTokenID()
+			if err != nil {
+				server.InternalError(w, correlationID)
+				return
+			}
+
+			ciphertext, iv, encryptedDEK, err := h.encryptPAN(ctx, panStr, kmsKeyARN)
+			if err != nil {
+				server.ServiceUnavailable(w, "Encryption service unavailable", correlationID)
+				return
+			}
+
+			token := &model.Token{
+				TenantID:      tenantID,
+				TokenID:       tokenID,
+				PANBlindIndex: blindIndex,
+				Status:        model.TokenStatusActive,
+			}
+			if err := h.tokenRepo.Create(ctx, token); err != nil {
+				server.InternalError(w, correlationID)
+				return
+			}
+
+			tagSize := 16
+			authTag := ciphertext[len(ciphertext)-tagSize:]
+			panCiphertext := ciphertext[:len(ciphertext)-tagSize]
+
+			vaultEntry := &model.VaultEntry{
+				TenantID:      tenantID,
+				TokenID:       tokenID,
+				PANCiphertext: panCiphertext,
+				IV:            iv,
+				AuthTag:       authTag,
+				DEKEncrypted:  encryptedDEK,
+				KMSKeyID:      kmsKeyARN,
+			}
+			if err := h.vaultRepo.Create(ctx, vaultEntry); err != nil {
+				server.InternalError(w, correlationID)
+				return
+			}
+
+			panTokenID = tokenID
+			newPANToken = true
+		}
+
+		// Replace pan value with token in the response body
+		body["pan"] = panTokenID
+		h.logAudit(ctx, tenantID, correlationID, panTokenID, model.AuditResultSuccess)
 	}
 
-	if existing != nil {
-		h.tokenRepo.UpdateExpiry(ctx, tenantID, existing.TokenID, req.ExpiryMonth, req.ExpiryYear)
-		cvvStored := h.storeCVV(ctx, tenantID, existing.TokenID, req.CVV)
+	// Process CVV if present
+	if hasCVV {
+		cvvStr, ok := body["cvv"].(string)
+		if !ok {
+			server.BadRequest(w, "INVALID_CVV", "CVV must be a string", correlationID)
+			return
+		}
+		if !validateCVV(cvvStr) {
+			server.BadRequest(w, "INVALID_CVV", "CVV must be 3-4 digits", correlationID)
+			return
+		}
 
-		h.logAudit(ctx, tenantID, correlationID, existing.TokenID, model.AuditResultSuccess)
+		cvvTokenID, err := generateTokenID()
+		if err != nil {
+			server.InternalError(w, correlationID)
+			return
+		}
 
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(TokenizeResponse{
-			Token:      existing.TokenID,
-			CVVStored:  cvvStored,
-			IsExisting: true,
-		})
-		return
+		if ok := h.storeCVVToken(ctx, tenantID, cvvTokenID, cvvStr); !ok {
+			server.InternalError(w, correlationID)
+			return
+		}
+
+		// Invalidate previous CVV token if we have a PAN token association
+		if panTokenID != "" {
+			h.cvvStore.InvalidatePreviousCVVToken(ctx, tenantID, panTokenID, cvvTokenID, h.cvvTTL)
+		}
+
+		// Replace cvv value with token in the response body
+		body["cvv"] = cvvTokenID
+		h.logAudit(ctx, tenantID, correlationID, cvvTokenID, model.AuditResultSuccess)
 	}
 
-	tokenID, err := generateTokenID()
-	if err != nil {
-		server.InternalError(w, correlationID)
-		return
-	}
-
-	ciphertext, iv, encryptedDEK, err := h.encryptPAN(ctx, req.PAN, kmsKeyARN)
-	if err != nil {
-		server.ServiceUnavailable(w, "Encryption service unavailable", correlationID)
-		return
-	}
-
-	token := &model.Token{
-		TenantID:      tenantID,
-		TokenID:       tokenID,
-		PANBlindIndex: blindIndex,
-		Status:        model.TokenStatusActive,
-		ExpiryMonth:   req.ExpiryMonth,
-		ExpiryYear:    req.ExpiryYear,
-	}
-
-	if err := h.tokenRepo.Create(ctx, token); err != nil {
-		server.InternalError(w, correlationID)
-		return
-	}
-
-	tagSize := 16
-	authTag := ciphertext[len(ciphertext)-tagSize:]
-	panCiphertext := ciphertext[:len(ciphertext)-tagSize]
-
-	vaultEntry := &model.VaultEntry{
-		TenantID:      tenantID,
-		TokenID:       tokenID,
-		PANCiphertext: panCiphertext,
-		IV:            iv,
-		AuthTag:       authTag,
-		DEKEncrypted:  encryptedDEK,
-		KMSKeyID:      kmsKeyARN,
-	}
-
-	if err := h.vaultRepo.Create(ctx, vaultEntry); err != nil {
-		server.InternalError(w, correlationID)
-		return
-	}
-
-	cvvStored := h.storeCVV(ctx, tenantID, tokenID, req.CVV)
-
-	h.logAudit(ctx, tenantID, correlationID, tokenID, model.AuditResultSuccess)
-
+	// Echo response — all non-sensitive fields pass through unchanged
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(TokenizeResponse{
-		Token:      tokenID,
-		CVVStored:  cvvStored,
-		IsExisting: false,
-	})
+	if newPANToken {
+		w.WriteHeader(http.StatusCreated)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+	json.NewEncoder(w).Encode(body)
 }
 
 func (h *TokenizeHandler) encryptPAN(ctx context.Context, pan, keyARN string) (ciphertext, iv, encryptedDEK []byte, err error) {
@@ -200,7 +211,7 @@ func (h *TokenizeHandler) encryptPAN(ctx context.Context, pan, keyARN string) (c
 	return ciphertext, iv, dekEncrypted, nil
 }
 
-func (h *TokenizeHandler) storeCVV(ctx context.Context, tenantID, tokenID, cvv string) bool {
+func (h *TokenizeHandler) storeCVVToken(ctx context.Context, tenantID, cvvTokenID, cvv string) bool {
 	dek, err := crypto.GenerateDEK()
 	if err != nil {
 		return false
@@ -212,12 +223,11 @@ func (h *TokenizeHandler) storeCVV(ctx context.Context, tenantID, tokenID, cvv s
 		return false
 	}
 
-	// Combined format: dek(32) + iv(12) + ciphertext_with_tag
 	combined := make([]byte, 0, len(dek)+len(iv)+len(ciphertext))
 	combined = append(combined, dek...)
 	combined = append(combined, iv...)
 	combined = append(combined, ciphertext...)
-	if err := h.cvvStore.Store(ctx, tenantID, tokenID, combined, h.cvvTTL); err != nil {
+	if err := h.cvvStore.StoreCVVToken(ctx, tenantID, cvvTokenID, combined, h.cvvTTL); err != nil {
 		return false
 	}
 	return true
@@ -234,13 +244,11 @@ func (h *TokenizeHandler) logAudit(ctx context.Context, tenantID, correlationID,
 	})
 }
 
-// validatePAN checks digit count (13-19) and Luhn checksum.
 func validatePAN(pan string) bool {
 	n := len(pan)
 	if n < 13 || n > 19 {
 		return false
 	}
-
 	sum := 0
 	alt := false
 	for i := n - 1; i >= 0; i-- {
@@ -260,7 +268,19 @@ func validatePAN(pan string) bool {
 	return sum%10 == 0
 }
 
-// generateTokenID produces a tok_ prefixed unique identifier.
+func validateCVV(cvv string) bool {
+	n := len(cvv)
+	if n < 3 || n > 4 {
+		return false
+	}
+	for _, c := range cvv {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func generateTokenID() (string, error) {
 	b := make([]byte, 20)
 	if _, err := rand.Read(b); err != nil {

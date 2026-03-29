@@ -20,10 +20,7 @@ type DetokenizeRequest struct {
 }
 
 type DetokenizeResponse struct {
-	PAN         string  `json:"pan"`
-	ExpiryMonth int     `json:"expiry_month"`
-	ExpiryYear  int     `json:"expiry_year"`
-	CVV         *string `json:"cvv"`
+	Value string `json:"value"`
 }
 
 type DetokenizeHandler struct {
@@ -67,46 +64,59 @@ func (h *DetokenizeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Try PAN token first (PostgreSQL)
 	token, err := h.tokenRepo.FindByTokenID(ctx, tenantID, req.Token)
 	if err != nil {
 		server.InternalError(w, correlationID)
 		return
 	}
-	if token == nil || token.Status != model.TokenStatusActive {
-		server.NotFound(w, "TOKEN_NOT_FOUND", "Token not found or inactive", correlationID)
+
+	if token != nil {
+		if token.Status != model.TokenStatusActive {
+			server.NotFound(w, "TOKEN_INACTIVE", "Token is inactive", correlationID)
+			return
+		}
+
+		pan, err := h.decryptPAN(ctx, tenantID, req.Token)
+		if err != nil {
+			server.InternalError(w, correlationID)
+			return
+		}
+
+		h.tokenRepo.UpdateLastUsed(ctx, tenantID, req.Token)
+
+		h.audit.Log(ctx, &model.AuditLogEntry{
+			TenantID:      tenantID,
+			CorrelationID: correlationID,
+			Operation:     model.AuditOpDetokenize,
+			TokenIDMasked: audit.MaskTokenID(req.Token),
+			Actor:         "proxy",
+			Result:        model.AuditResultSuccess,
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(DetokenizeResponse{Value: pan})
 		return
 	}
 
-	pan, err := h.decryptPAN(ctx, tenantID, req.Token)
-	if err != nil {
-		server.InternalError(w, correlationID)
-		return
-	}
-
-	h.tokenRepo.UpdateLastUsed(ctx, tenantID, req.Token)
-
-	var cvvPtr *string
-	cvv := h.retrieveCVV(ctx, tenantID, req.Token)
+	// Try CVV token (Redis)
+	cvv := h.retrieveCVVToken(ctx, tenantID, req.Token)
 	if cvv != "" {
-		cvvPtr = &cvv
+		h.audit.Log(ctx, &model.AuditLogEntry{
+			TenantID:      tenantID,
+			CorrelationID: correlationID,
+			Operation:     model.AuditOpDetokenize,
+			TokenIDMasked: audit.MaskTokenID(req.Token),
+			Actor:         "proxy",
+			Result:        model.AuditResultSuccess,
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(DetokenizeResponse{Value: cvv})
+		return
 	}
 
-	h.audit.Log(ctx, &model.AuditLogEntry{
-		TenantID:      tenantID,
-		CorrelationID: correlationID,
-		Operation:     model.AuditOpDetokenize,
-		TokenIDMasked: audit.MaskTokenID(req.Token),
-		Actor:         "proxy",
-		Result:        model.AuditResultSuccess,
-	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(DetokenizeResponse{
-		PAN:         pan,
-		ExpiryMonth: token.ExpiryMonth,
-		ExpiryYear:  token.ExpiryYear,
-		CVV:         cvvPtr,
-	})
+	server.NotFound(w, "TOKEN_NOT_FOUND", "Token not found, expired, or consumed", correlationID)
 }
 
 func (h *DetokenizeHandler) decryptPAN(ctx context.Context, tenantID, tokenID string) (string, error) {
@@ -130,8 +140,8 @@ func (h *DetokenizeHandler) decryptPAN(ctx context.Context, tenantID, tokenID st
 	return string(plaintext), nil
 }
 
-func (h *DetokenizeHandler) retrieveCVV(ctx context.Context, tenantID, tokenID string) string {
-	combined, err := h.cvvStore.Retrieve(ctx, tenantID, tokenID)
+func (h *DetokenizeHandler) retrieveCVVToken(ctx context.Context, tenantID, cvvTokenID string) string {
+	combined, err := h.cvvStore.RetrieveCVVToken(ctx, tenantID, cvvTokenID)
 	if err != nil || combined == nil {
 		return ""
 	}
