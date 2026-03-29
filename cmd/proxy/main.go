@@ -41,7 +41,11 @@ func main() {
 		Timeout: 30 * time.Second,
 	}
 
-	revealer := proxy.NewRevealer(tokenizerClient, tokenizerBaseURL)
+	proxyAuth := os.Getenv("PROXY_AUTH_HEADER")
+	if proxyAuth == "" {
+		proxyAuth = "Bearer proxy:secret"
+	}
+	revealer := proxy.NewRevealer(tokenizerClient, tokenizerBaseURL, proxyAuth)
 	forwarder := proxy.NewForwarder(forwardClient)
 	forwardHandler := handler.NewForwardHandler(revealer, forwarder)
 	healthHandler := handler.NewProxyHealthHandler()
@@ -51,9 +55,10 @@ func main() {
 	// Health — no auth
 	r.Get("/health", healthHandler.ServeHTTP)
 
-	// Authenticated routes
+	// Authenticated + tenant-scoped routes
 	r.Group(func(r chi.Router) {
 		r.Use(auth.BearerAuth)
+		r.Use(auth.ExtractTenantHeader)
 		r.Post("/proxy/forward", forwardHandler.ServeHTTP)
 	})
 

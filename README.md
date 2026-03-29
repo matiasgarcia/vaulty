@@ -149,6 +149,35 @@ curl -X POST http://localhost:8081/proxy/forward \
 
 The proxy scans `payload` for any `tok_...` values, reveals them (replaces with real PAN/expiry/CVV), and forwards the entire payload to the destination.
 
+## Multitenancy
+
+The system is fully multitenant. Every data operation is scoped by a mandatory `X-Tenant-ID` header.
+
+- **Same PAN + different tenant = different token** (tenant-scoped blind index)
+- **Same PAN + same tenant = same token** (deterministic within tenant)
+- **Per-tenant KMS key** — each tenant gets a dedicated encryption key provisioned at creation
+- **Zero cross-tenant data leakage** — all queries filtered by tenant
+
+### Tenant provisioning
+
+```bash
+curl -X POST http://localhost:8080/admin/tenants \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer admin:secret" \
+  -d '{"tenant_id": "merchant-a", "name": "Merchant A"}'
+```
+
+All subsequent requests must include `X-Tenant-ID: merchant-a`.
+
+### Tenant management
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/admin/tenants` | Create tenant (provisions KMS key) |
+| GET | `/admin/tenants` | List tenants |
+| GET | `/admin/tenants/{tenant_id}` | Get tenant details |
+| DELETE | `/admin/tenants/{tenant_id}` | Deactivate tenant |
+
 ## Authentication
 
 All endpoints (except `/health`) require a Bearer token:
@@ -159,7 +188,7 @@ Authorization: Bearer <service_name>:<secret>
 
 Service roles:
 - `client` — can tokenize and forward
-- `admin` — can tokenize and manage tokens
+- `admin` — can tokenize, manage tokens, and manage tenants
 - `proxy` — can forward and detokenize (internal)
 
 ## Project Structure
@@ -206,6 +235,25 @@ test/
 | `TOKENIZER_BASE_URL` | Proxy → Tokenizer URL | `http://localhost:8080` |
 | `LOG_LEVEL` | Log level | `info` |
 | `LOG_FORMAT` | Log format (json/text) | `json` |
+
+## Tests
+
+Integration tests run against real PostgreSQL, Redis, and LocalStack containers via [testcontainers-go](https://golang.testcontainers.org/). Docker must be running.
+
+```bash
+# Run all integration tests
+go test -tags=integration -v -timeout=600s ./tests/integration/...
+
+# Run a specific test
+go test -tags=integration -v -timeout=120s -run TestTokenize ./tests/integration/...
+
+# Run with race detection
+go test -tags=integration -race -timeout=600s ./tests/integration/...
+```
+
+No manual setup needed — containers are created and destroyed automatically per test.
+
+**Coverage areas**: tokenization, detokenization, forward/reveal, token lifecycle, authentication/RBAC, audit logging, tenant provisioning, multitenant isolation.
 
 ## Docker
 

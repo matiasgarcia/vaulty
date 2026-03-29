@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pci-vault/vault/internal/audit"
+	"github.com/pci-vault/vault/internal/auth"
 	"github.com/pci-vault/vault/internal/crypto"
 	"github.com/pci-vault/vault/internal/kms"
 	"github.com/pci-vault/vault/internal/model"
@@ -95,20 +96,27 @@ func (h *TokenizeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	blindIndex := crypto.ComputeBlindIndex(req.PAN, h.hmacKey)
+	tenant := auth.GetTenant(ctx)
+	if tenant == nil {
+		server.BadRequest(w, "MISSING_TENANT", "Tenant context required", correlationID)
+		return
+	}
+	tenantID := tenant.TenantID
+	kmsKeyARN := tenant.KMSKeyARN
 
-	existing, err := h.tokenRepo.FindByBlindIndex(ctx, blindIndex)
+	blindIndex := crypto.ComputeBlindIndex(tenantID, req.PAN, h.hmacKey)
+
+	existing, err := h.tokenRepo.FindByBlindIndex(ctx, tenantID, blindIndex)
 	if err != nil {
 		server.InternalError(w, correlationID)
 		return
 	}
 
 	if existing != nil {
-		// PAN already tokenized — return existing token, update CVV/expiry
-		h.tokenRepo.UpdateExpiry(ctx, existing.TokenID, req.ExpiryMonth, req.ExpiryYear)
-		cvvStored := h.storeCVV(ctx, existing.TokenID, req.CVV)
+		h.tokenRepo.UpdateExpiry(ctx, tenantID, existing.TokenID, req.ExpiryMonth, req.ExpiryYear)
+		cvvStored := h.storeCVV(ctx, tenantID, existing.TokenID, req.CVV)
 
-		h.logAudit(ctx, correlationID, existing.TokenID, model.AuditResultSuccess)
+		h.logAudit(ctx, tenantID, correlationID, existing.TokenID, model.AuditResultSuccess)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -120,20 +128,20 @@ func (h *TokenizeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// New PAN — generate token, encrypt, store
 	tokenID, err := generateTokenID()
 	if err != nil {
 		server.InternalError(w, correlationID)
 		return
 	}
 
-	ciphertext, iv, encryptedDEK, err := h.encryptPAN(ctx, req.PAN)
+	ciphertext, iv, encryptedDEK, err := h.encryptPAN(ctx, req.PAN, kmsKeyARN)
 	if err != nil {
 		server.ServiceUnavailable(w, "Encryption service unavailable", correlationID)
 		return
 	}
 
 	token := &model.Token{
+		TenantID:      tenantID,
 		TokenID:       tokenID,
 		PANBlindIndex: blindIndex,
 		Status:        model.TokenStatusActive,
@@ -146,18 +154,18 @@ func (h *TokenizeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// GCM appends auth tag to ciphertext; split for storage
 	tagSize := 16
 	authTag := ciphertext[len(ciphertext)-tagSize:]
 	panCiphertext := ciphertext[:len(ciphertext)-tagSize]
 
 	vaultEntry := &model.VaultEntry{
+		TenantID:      tenantID,
 		TokenID:       tokenID,
 		PANCiphertext: panCiphertext,
 		IV:            iv,
 		AuthTag:       authTag,
 		DEKEncrypted:  encryptedDEK,
-		KMSKeyID:      h.kmsKeyARN,
+		KMSKeyID:      kmsKeyARN,
 	}
 
 	if err := h.vaultRepo.Create(ctx, vaultEntry); err != nil {
@@ -165,9 +173,9 @@ func (h *TokenizeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cvvStored := h.storeCVV(ctx, tokenID, req.CVV)
+	cvvStored := h.storeCVV(ctx, tenantID, tokenID, req.CVV)
 
-	h.logAudit(ctx, correlationID, tokenID, model.AuditResultSuccess)
+	h.logAudit(ctx, tenantID, correlationID, tokenID, model.AuditResultSuccess)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -178,8 +186,8 @@ func (h *TokenizeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *TokenizeHandler) encryptPAN(ctx context.Context, pan string) (ciphertext, iv, encryptedDEK []byte, err error) {
-	dekPlain, dekEncrypted, err := h.kmsClient.GenerateDataKey(ctx)
+func (h *TokenizeHandler) encryptPAN(ctx context.Context, pan, keyARN string) (ciphertext, iv, encryptedDEK []byte, err error) {
+	dekPlain, dekEncrypted, err := h.kmsClient.GenerateDataKeyWithARN(ctx, keyARN)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -192,7 +200,7 @@ func (h *TokenizeHandler) encryptPAN(ctx context.Context, pan string) (ciphertex
 	return ciphertext, iv, dekEncrypted, nil
 }
 
-func (h *TokenizeHandler) storeCVV(ctx context.Context, tokenID, cvv string) bool {
+func (h *TokenizeHandler) storeCVV(ctx context.Context, tenantID, tokenID, cvv string) bool {
 	dek, err := crypto.GenerateDEK()
 	if err != nil {
 		return false
@@ -209,14 +217,15 @@ func (h *TokenizeHandler) storeCVV(ctx context.Context, tokenID, cvv string) boo
 	combined = append(combined, dek...)
 	combined = append(combined, iv...)
 	combined = append(combined, ciphertext...)
-	if err := h.cvvStore.Store(ctx, tokenID, combined, h.cvvTTL); err != nil {
+	if err := h.cvvStore.Store(ctx, tenantID, tokenID, combined, h.cvvTTL); err != nil {
 		return false
 	}
 	return true
 }
 
-func (h *TokenizeHandler) logAudit(ctx context.Context, correlationID, tokenID string, result model.AuditResult) {
+func (h *TokenizeHandler) logAudit(ctx context.Context, tenantID, correlationID, tokenID string, result model.AuditResult) {
 	h.audit.Log(ctx, &model.AuditLogEntry{
+		TenantID:      tenantID,
 		CorrelationID: correlationID,
 		Operation:     model.AuditOpTokenize,
 		TokenIDMasked: audit.MaskTokenID(tokenID),

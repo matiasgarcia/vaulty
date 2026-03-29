@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/pci-vault/vault/internal/audit"
+	"github.com/pci-vault/vault/internal/auth"
 	"github.com/pci-vault/vault/internal/crypto"
 	"github.com/pci-vault/vault/internal/kms"
 	"github.com/pci-vault/vault/internal/model"
@@ -53,13 +54,20 @@ func (h *DetokenizeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	correlationID := server.GetCorrelationID(ctx)
 
+	tenant := auth.GetTenant(ctx)
+	if tenant == nil {
+		server.BadRequest(w, "MISSING_TENANT", "Tenant context required", correlationID)
+		return
+	}
+	tenantID := tenant.TenantID
+
 	var req DetokenizeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		server.BadRequest(w, "INVALID_JSON", "Invalid request body", correlationID)
 		return
 	}
 
-	token, err := h.tokenRepo.FindByTokenID(ctx, req.Token)
+	token, err := h.tokenRepo.FindByTokenID(ctx, tenantID, req.Token)
 	if err != nil {
 		server.InternalError(w, correlationID)
 		return
@@ -69,21 +77,22 @@ func (h *DetokenizeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pan, err := h.decryptPAN(ctx, req.Token)
+	pan, err := h.decryptPAN(ctx, tenantID, req.Token)
 	if err != nil {
 		server.InternalError(w, correlationID)
 		return
 	}
 
-	h.tokenRepo.UpdateLastUsed(ctx, req.Token)
+	h.tokenRepo.UpdateLastUsed(ctx, tenantID, req.Token)
 
 	var cvvPtr *string
-	cvv := h.retrieveCVV(ctx, req.Token)
+	cvv := h.retrieveCVV(ctx, tenantID, req.Token)
 	if cvv != "" {
 		cvvPtr = &cvv
 	}
 
 	h.audit.Log(ctx, &model.AuditLogEntry{
+		TenantID:      tenantID,
 		CorrelationID: correlationID,
 		Operation:     model.AuditOpDetokenize,
 		TokenIDMasked: audit.MaskTokenID(req.Token),
@@ -100,8 +109,8 @@ func (h *DetokenizeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *DetokenizeHandler) decryptPAN(ctx context.Context, tokenID string) (string, error) {
-	ve, err := h.vaultRepo.FindByTokenID(ctx, tokenID)
+func (h *DetokenizeHandler) decryptPAN(ctx context.Context, tenantID, tokenID string) (string, error) {
+	ve, err := h.vaultRepo.FindByTokenID(ctx, tenantID, tokenID)
 	if err != nil || ve == nil {
 		return "", err
 	}
@@ -112,7 +121,6 @@ func (h *DetokenizeHandler) decryptPAN(ctx context.Context, tokenID string) (str
 	}
 	defer clearBytes(dek)
 
-	// Reassemble GCM ciphertext (ciphertext + auth tag)
 	fullCiphertext := append(ve.PANCiphertext, ve.AuthTag...)
 	plaintext, err := crypto.DecryptWithDEK(fullCiphertext, ve.IV, dek)
 	if err != nil {
@@ -122,13 +130,12 @@ func (h *DetokenizeHandler) decryptPAN(ctx context.Context, tokenID string) (str
 	return string(plaintext), nil
 }
 
-func (h *DetokenizeHandler) retrieveCVV(ctx context.Context, tokenID string) string {
-	combined, err := h.cvvStore.Retrieve(ctx, tokenID)
+func (h *DetokenizeHandler) retrieveCVV(ctx context.Context, tenantID, tokenID string) string {
+	combined, err := h.cvvStore.Retrieve(ctx, tenantID, tokenID)
 	if err != nil || combined == nil {
 		return ""
 	}
 
-	// Combined format: 32-byte DEK + encrypted CVV
 	dekSize := 32
 	if len(combined) <= dekSize {
 		return ""
@@ -138,12 +145,6 @@ func (h *DetokenizeHandler) retrieveCVV(ctx context.Context, tokenID string) str
 	encrypted := combined[dekSize:]
 	defer clearBytes(dek)
 
-	// The encrypted CVV includes IV (first 12 bytes are from GCM Seal, embedded in ciphertext)
-	// Actually, our Encrypt prepends nothing — ciphertext from Seal includes tag but not IV.
-	// We stored: dek + Seal(iv, plaintext) but we didn't store the IV separately.
-	// Fix: we need to re-think CVV storage to include IV.
-	// For now, since CVV is short-lived, let's use a simpler approach:
-	// Store dek(32) + iv(12) + ciphertext_with_tag
 	if len(encrypted) < 12 {
 		return ""
 	}

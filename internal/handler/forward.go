@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/pci-vault/vault/internal/auth"
 	"github.com/pci-vault/vault/internal/proxy"
 	"github.com/pci-vault/vault/internal/server"
 )
@@ -52,8 +53,14 @@ func (h *ForwardHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.Method = http.MethodPost
 	}
 
+	// Extract tenant for reveal calls
+	tenantID := ""
+	if tenant := auth.GetTenant(ctx); tenant != nil {
+		tenantID = tenant.TenantID
+	}
+
 	// Scan payload for tokens and reveal them
-	revealed, err := h.revealer.ScanAndReveal(ctx, req.Payload)
+	revealed, err := h.revealer.ScanAndReveal(ctx, tenantID, req.Payload)
 	if err != nil {
 		server.NotFound(w, "DETOKENIZE_FAILED", err.Error(), correlationID)
 		return

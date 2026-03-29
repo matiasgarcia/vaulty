@@ -11,6 +11,7 @@ const (
 
 type Token struct {
 	ID            string      `json:"id"`
+	TenantID      string      `json:"tenant_id"`
 	TokenID       string      `json:"token_id"`
 	PANBlindIndex string      `json:"pan_blind_index"`
 	Status        TokenStatus `json:"status"`
