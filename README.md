@@ -117,12 +117,22 @@ docker compose logs mock-provider
 
 ## Usage Examples
 
+### Create a tenant (required first)
+
+```bash
+curl -X POST http://localhost:8080/admin/tenants \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer admin:secret" \
+  -d '{"tenant_id": "merchant-a", "name": "Merchant A"}'
+```
+
 ### Tokenize a card
 
 ```bash
 curl -X POST http://localhost:8080/vault/tokenize \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer client:secret" \
+  -H "X-Tenant-ID: merchant-a" \
   -d '{
     "pan": "4111111111111111",
     "expiry_month": 12,
@@ -137,6 +147,7 @@ curl -X POST http://localhost:8080/vault/tokenize \
 curl -X POST http://localhost:8081/proxy/forward \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer client:secret" \
+  -H "X-Tenant-ID: merchant-a" \
   -d '{
     "destination": "http://localhost:9090/receive",
     "payload": {
